@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import 'dart:math' as math;
 import 'todo.dart';
 import 'nut.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class MyPage extends StatelessWidget {
   final List<Todo> todos;
@@ -38,35 +39,91 @@ class MyPage extends StatelessWidget {
   }
 
   Widget _buildTodoCompletionChart() {
-    final completionRates = _calculateTodoCompletionRates();
-    return Container(
-      height: 200,
-      child: completionRates.isEmpty
-          ? Center(child: Text('할 일 데이터가 없습니다.'))
-          : LineChart(
-        LineChartData(
-          gridData: FlGridData(show: false),
-          titlesData: FlTitlesData(show: false),
-          borderData: FlBorderData(show: true),
-          minX: 0,
-          maxX: completionRates.length.toDouble() - 1,
-          minY: 0,
-          maxY: 100,
-          lineBarsData: [
-            LineChartBarData(
-              spots: completionRates.asMap().entries.map((entry) {
-                return FlSpot(entry.key.toDouble(), entry.value);
-              }).toList(),
-              isCurved: true,
-              color: Colors.blue,
-              dotData: FlDotData(show: false),
-              belowBarData: BarAreaData(show: false),
+    return StreamBuilder<QuerySnapshot>(
+      stream: FirebaseFirestore.instance.collection('todos').snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return Center(child: CircularProgressIndicator());
+        }
+
+        final todos = snapshot.data!.docs.map((doc) => Todo.fromFirestore(doc)).toList();
+        final completionRates = _calculateTodoCompletionRates(todos);
+
+        if (completionRates.isEmpty) {
+          return Center(child: Text('할 일 데이터가 없습니다.'));
+        }
+
+        final now = DateTime.now();
+
+        return Container(
+          height: 300,
+          child: LineChart(
+            LineChartData(
+              gridData: FlGridData(show: false, // 전체 그리드 선을 숨김
+                drawHorizontalLine: false, // 가로 점선 숨김
+                drawVerticalLine: false,),   // 세로 점선 숨김
+              titlesData: FlTitlesData(
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 40,
+                    interval: 20,
+                    getTitlesWidget: (value, meta) {
+                      if (value == 120) return SizedBox(); // maxY에 해당하는 레이블 숨김
+                      return Text(
+                        '${value.toInt()}%',
+                        style: TextStyle(fontSize: 12),
+                      );
+                    },
+                  ),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    interval: 1,
+                    getTitlesWidget: (value, meta) {
+                      final dayIndex = value.toInt();
+                      if (dayIndex < 0 || dayIndex > 6) return SizedBox();
+                      final date = now.subtract(Duration(days: 6 - dayIndex));
+                      return Text(
+                        '${date.month}/${date.day}',
+                        style: TextStyle(fontSize: 10),
+                      );
+                    },
+                  ),
+                ),
+                rightTitles: AxisTitles(
+                  sideTitles: SideTitles(showTitles: false), // 오른쪽 레이블 숨김
+                ),
+                topTitles: AxisTitles(
+                  sideTitles: SideTitles(showTitles: false), // 위쪽 레이블 숨김
+                ),
+              ),
+              borderData: FlBorderData(show: true),
+              minX: 0, // X축 최소값
+              maxX: 7, // X축 최대값
+              minY: 0, // Y축 최소값
+              maxY: 120, // Y축 최대값
+              lineBarsData: [
+                LineChartBarData(
+                  spots: completionRates.asMap().entries.map((entry) {
+                    return FlSpot(entry.key.toDouble(), entry.value.toDouble());
+                  }).toList(),
+                  isCurved: true, // 곡선을 유지
+                  color: Colors.blue,
+                  dotData: FlDotData(show: true),
+                  belowBarData: BarAreaData(show: false), // 그래프 아래 영역 숨김
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
+
+
+
 
   Widget _buildNutritionIntakeChart() {
     final intakeRates = _calculateNutritionIntakeRates();
@@ -93,7 +150,7 @@ class MyPage extends StatelessWidget {
   }
 
   Widget _buildCorrelationAnalysis() {
-    List<double> todoCompletionRates = _calculateTodoCompletionRates();
+    List<double> todoCompletionRates = _calculateTodoCompletionRates(todos);
     List<double> nutritionIntakeRates = _calculateNutritionIntakeRates();
 
     if (todoCompletionRates.isEmpty || nutritionIntakeRates.isEmpty) {
@@ -105,23 +162,26 @@ class MyPage extends StatelessWidget {
   }
 
   Widget _buildRecommendations() {
-    if (_calculateTodoCompletionRates().isEmpty && _calculateNutritionIntakeRates().isEmpty) {
+    if (_calculateTodoCompletionRates(todos).isEmpty && _calculateNutritionIntakeRates().isEmpty) {
       return Text('추천을 생성할 데이터가 충분하지 않습니다.');
     }
     String recommendation = _generateRecommendation();
     return Text('추천: $recommendation', style: TextStyle(fontWeight: FontWeight.bold));
   }
 
-  List<double> _calculateTodoCompletionRates() {
-    // 최근 7일간의 Todo 완료율 계산
-    final now = DateTime.now();
-    return List.generate(7, (index) {
+  List<double> _calculateTodoCompletionRates(List<Todo> todos) {
+    final now = DateTime.now(); //현재 날짜 기준
+    return List.generate(7, (index) { //7일간의 데이터
       final date = now.subtract(Duration(days: index));
-      final todosForDay = todos.where((todo) => isSameDay(todo.date, date)).toList();
+      final todosForDay = todos.where((todo) => isSameDay(todo.date, date)).toList(); //todosForDay에 저장
       if (todosForDay.isEmpty) return 0.0;
-      final completedTodos = todosForDay.where((todo) => todo.isDone).length;
-      return (completedTodos / todosForDay.length) * 100;
+      final completedTodos = todosForDay.where((todo) => todo.isDone).length; //완료된 할 일 개수 계산
+      return (completedTodos / todosForDay.length) * 100; //백분율
     }).reversed.toList();
+  }
+
+  bool isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
   }
 
   List<double> _calculateNutritionIntakeRates() {
@@ -158,7 +218,7 @@ class MyPage extends StatelessWidget {
   }
 
   String _generateRecommendation() {
-    double todoAverage = _calculateTodoCompletionRates().average;
+    double todoAverage = _calculateTodoCompletionRates(todos).average;
     double nutritionAverage = _calculateNutritionIntakeRates().average;
 
     if (todoAverage < 50 && nutritionAverage < 50) {
